@@ -1,0 +1,81 @@
+{
+  "options": {
+    "matchOptions": "basic",
+    "merging": [
+      {
+        "propertyName": "ssn",
+        "sourceRef": {
+          "documentUri": "docA"
+        }
+      },
+      {
+        "propertyName": "name",
+        "maxValues": "1",
+        "doubleMetaphone": {
+          "distanceThreshold": "50"
+        },
+        "synonymsSupport": "true",
+        "thesaurus": "/mdm/config/thesauri/first-name-synonyms.xml",
+        "length": {
+          "weight": "8"
+        }
+      },
+      {
+        "default": "true",
+        "strategy": "default-standard"
+      }
+    ],
+    "propertyDefs": {
+      "properties": [
+        {
+          "namespace": "",
+          "localname": "IdentificationID",
+          "name": "ssn"
+        },
+        {
+          "namespace": "",
+          "localname": "PersonName",
+          "name": "name"
+        },
+        {
+          "namespace": "",
+          "localname": "Address",
+          "name": "address"
+        }
+      ]
+    },
+    "mergeStrategies": [
+      {
+        "name": "default-standard",
+        "algorithmRef": "standard",
+        "maxValues": "1",
+        "sourceWeights": [
+          {
+            "source": {
+              "name": "SOURCE2",
+              "weight": "10"
+            }
+          }
+        ]
+      }
+    ],
+    "algorithms": {
+      "collections": {
+        "onMerge": "",
+        "onNotification": "",
+        "onArchive": "",
+        "onNoMatch": ""
+      },
+      "stdAlgorithm": {
+        "namespaces": {
+          "sm": "http://marklogic.com/smart-mastering",
+          "es": "http://marklogic.com/entity-services"
+        },
+        "timestamp": {
+          "path": "/es:envelope/es:headers/sm:sources/sm:source/sm:one-first"
+        }
+      },
+      "custom": []
+    }
+  }
+}

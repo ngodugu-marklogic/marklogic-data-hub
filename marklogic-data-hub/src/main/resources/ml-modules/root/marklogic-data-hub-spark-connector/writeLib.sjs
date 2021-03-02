@@ -20,8 +20,8 @@
  * a new endpoint for writing records.
  */
 const consts = require("/data-hub/5/impl/consts.sjs");
-const FlowUtils = require("/data-hub/5/impl/flow-utils.sjs");
-const HubUtils = require("/data-hub/5/impl/hub-utils.sjs");
+const flowUtils = require("/data-hub/5/impl/flow-utils.sjs");
+const hubUtils = require("/data-hub/5/impl/hub-utils.sjs");
 const temporal = require("/MarkLogic/temporal.xqy");
 
 function buildHeaders(endpointConstants) {
@@ -38,7 +38,7 @@ function buildHeaders(endpointConstants) {
     headers.sources = sources
   }
 
-  return new FlowUtils().createHeaders({headers});
+  return flowUtils.createHeaders({headers});
 }
 
 function buildInsertOptions(endpointConstants) {
@@ -57,7 +57,7 @@ function buildInsertOptions(endpointConstants) {
 
   // To ensure this endpoint can work with DHF 5.2.x, must use data-hub-operator, which is the least-privileged role in 5.2.x
   const permissions = endpointConstants.permissions != null ? endpointConstants.permissions : 'data-hub-operator,read,data-hub-operator,update'
-  const permissionsArray = new HubUtils().parsePermissions(permissions);
+  const permissionsArray = hubUtils.parsePermissions(permissions);
 
   return {
     temporalCollection,

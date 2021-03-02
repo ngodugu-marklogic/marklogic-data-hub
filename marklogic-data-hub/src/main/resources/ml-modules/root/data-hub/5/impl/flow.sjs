@@ -14,10 +14,12 @@
  limitations under the License.
  */
 'use strict';
-const FlowUtils = require("/data-hub/5/impl/flow-utils.sjs");
-const StepDefinition = require("/data-hub/5/impl/stepDefinition.sjs");
-const jobsMod = require("/data-hub/5/impl/jobs.sjs");
+const Artifacts = require('/data-hub/5/artifacts/core.sjs');
+const flowRunner = require("/data-hub/5/flow/flowRunner.sjs");
 const httpUtils = require("/data-hub/5/impl/http-utils.sjs");
+const hubUtils = require("/data-hub/5/impl/hub-utils.sjs");
+const jobsMod = require("/data-hub/5/impl/jobs.sjs");
+const StepDefinition = require("/data-hub/5/impl/stepDefinition.sjs");
 
 // define constants for caching expensive operations
 const cachedFlows = {};
@@ -34,7 +36,7 @@ const defaultGlobalContext = {
 
 class Flow {
 
-  constructor(config = null, globalContext = null, datahub = null, artifactsCore = null) {
+  constructor(config = null, globalContext = null, datahub = null) {
     if (!config) {
       config = require("/com.marklogic.hub/config.sjs");
     }
@@ -46,9 +48,12 @@ class Flow {
     }
     this.datahub = datahub;
     this.stepDefinition = new StepDefinition(config, datahub);
-    this.flowUtils = new FlowUtils();
+
+    // Starting in 5.5, this is needed for backwards compatibility so that scaffolded modules can still 
+    // refer to datahub.flow.flowUtils . 
+    this.flowUtils = require("/data-hub/5/impl/flow-utils.sjs");
+    
     this.consts = datahub.consts;
-    this.artifactsCore =  require('/data-hub/5/artifacts/core.sjs');
     this.writeQueue = [];
     if (globalContext) {
       this.globalContext = globalContext;
@@ -100,7 +105,7 @@ class Flow {
 
   getFlow(name) {
     if (cachedFlows[name] === undefined) {
-      cachedFlows[name] =  this.artifactsCore.getFullFlow(name);
+      cachedFlows[name] = Artifacts.getFullFlow(name);
     }
     return cachedFlows[name];
   }
@@ -137,7 +142,7 @@ class Flow {
     let query;
     let uris = null;
     if (options.uris) {
-      uris = this.datahub.hubUtils.normalizeToArray(options.uris);
+      uris = hubUtils.normalizeToArray(options.uris);
 
       if (options.excludeAlreadyProcessed === true || options.excludeAlreadyProcessed === "true") {
         const stepId = flowStep.stepId ? flowStep.stepId : flowStep.name + "-" + flowStep.stepDefinitionType;
@@ -159,7 +164,7 @@ class Flow {
     }
 
     let sourceDatabase = combinedOptions.sourceDatabase || this.globalContext.sourceDatabase;
-    return this.datahub.hubUtils.queryToContentDescriptorArray(query, combinedOptions, sourceDatabase);
+    return hubUtils.queryToContentDescriptorArray(query, combinedOptions, sourceDatabase);
   }
 
   /**
@@ -259,7 +264,7 @@ class Flow {
 
     if (this.datahub.flow) {
       //clone and remove flow to avoid circular references
-      this.datahub = this.datahub.hubUtils.cloneInstance(this.datahub);
+      this.datahub = this.cloneInstance(this.datahub);
       delete this.datahub.flow;
     }
 
@@ -292,7 +297,7 @@ class Flow {
           // filter out any null/empty collections that may exist
           .filter((col) => !!col);
 
-        writeTransactionInfo = this.datahub.hubUtils.writeDocuments(this.writeQueue, xdmp.defaultPermissions(), collections, this.globalContext.targetDatabase);
+        writeTransactionInfo = hubUtils.writeDocuments(this.writeQueue, xdmp.defaultPermissions(), collections, this.globalContext.targetDatabase);
       } catch (e) {
         this.handleWriteError(this, e);
       }
@@ -348,7 +353,7 @@ class Flow {
       // Include all of the step context in the parameters for the custom hook to make use of
       let parameters = Object.assign({uris: items, content, options: combinedOptions, flowName, stepNumber, step: flowStep}, hook.parameters);
       hookOperation = function () {
-        flowInstance.datahub.hubUtils.invoke(
+        flowInstance.invokeCustomHook(
           hook.module,
           parameters,
           hook.user || xdmp.getCurrentUser(),
@@ -360,14 +365,14 @@ class Flow {
       hookOperation();
     }
 
-    const normalizeToSequence = flowInstance.datahub.hubUtils.normalizeToSequence;
     let contentArray = [];
 
     if (combinedOptions.acceptsBatch) {
       try {
-        const results = normalizeToSequence(flowInstance.runMain(normalizeToSequence(content), combinedOptions, processor.run));
+        const results = hubUtils.normalizeToSequence(flowInstance.runMain(hubUtils.normalizeToSequence(content), combinedOptions, processor.run));
         for (const result of results) {
-          this.addMetadataToContent(result, combinedOptions, flowName, flowStep);
+          content.previousUri = this.globalContext.uri;
+          flowRunner.addMetadataToContent(result, flowName, flowStep.name, this.globalContext.jobId);
           contentArray.push(result);
         }
         flowInstance.globalContext.completedItems = flowInstance.globalContext.completedItems.concat(items);
@@ -378,9 +383,9 @@ class Flow {
       for (let contentItem of content) {
         flowInstance.globalContext.uri = contentItem.uri;
         try {
-          const results = normalizeToSequence(flowInstance.runMain(contentItem, combinedOptions, processor.run));
+          const results = hubUtils.normalizeToSequence(flowInstance.runMain(contentItem, combinedOptions, processor.run));
           for (const result of results) {
-            this.addMetadataToContent(result, combinedOptions, flowName, flowStep);
+            flowRunner.addMetadataToContent(result, flowName, flowStep.name, this.globalContext.jobId);
             contentArray.push(result);
           }
           flowInstance.globalContext.completedItems.push(flowInstance.globalContext.uri);
@@ -419,6 +424,34 @@ class Flow {
     }
   }
 
+  invokeCustomHook(moduleUri, parameters, user = null, database) {
+    let options = this.buildCustomHookInvokeOptions(user, database);
+    xdmp.invoke(moduleUri, parameters, options)
+  }
+
+  buildCustomHookInvokeOptions(user = null, database) {
+    let options = {
+      ignoreAmps: true
+    };
+    if (user && user !== xdmp.getCurrentUser()) {
+      options.userId = xdmp.user(user);
+    }
+    if (database) {
+      options.database = xdmp.database(database);
+    }
+    return options;
+  }
+
+  cloneInstance(instance) {
+    let prototype = Object.getPrototypeOf(instance);
+    let keys = Object.getOwnPropertyNames(instance).concat(Object.getOwnPropertyNames(prototype));
+    let newInstance = {};
+    for (let key of keys) {
+      newInstance[key] = instance[key];
+    }
+    return newInstance;
+  }
+
   /**
    * Applies interceptors to the given content array. Interceptors can make any changes they wish to the items in the
    * content array, including adding and removing items, but the array itself cannot be changed - i.e. an interceptor may
@@ -436,25 +469,6 @@ class Flow {
         vars.options = combinedOptions;
         xdmp.invoke(interceptor.path, vars);
       });
-    }
-  }
-
-  addMetadataToContent(content, combinedOptions, flowName, flowStep) {
-    const normalizeToArray = this.datahub.hubUtils.normalizeToArray;
-    if (!combinedOptions.acceptsBatch) {
-      content.previousUri = this.globalContext.uri;
-    }
-    //add our metadata to this
-    content.context = content.context || {};
-    content.context.metadata = this.flowUtils.createMetadata(content.context.metadata ? content.context.metadata : {}, flowName, flowStep.name, this.globalContext.jobId);
-    // normalize context values to arrays
-    if (content.context.collections) {
-      content.context.collections = normalizeToArray(content.context.collections);
-    }
-    if (content.context.permissions) {
-      // normalize permissions to array of JSON permissions
-      content.context.permissions = normalizeToArray(content.context.permissions)
-        .map((perm) => (perm instanceof Element) ? xdmp.permission(xdmp.roleName(fn.string(perm.xpath('*:role-id'))), fn.string(perm.xpath('*:capability')), "object") : perm);
     }
   }
 
@@ -533,7 +547,7 @@ class Flow {
       for (let content of this.writeQueue) {
         // We may want to hide some documents from provenance. e.g., we don't need provenance of mastering PROV documents
         if (content.provenance !== false) {
-          const previousUris = this.datahub.hubUtils.normalizeToArray(content.previousUri || content.uri);
+          const previousUris = hubUtils.normalizeToArray(content.previousUri || content.uri);
           const info = {
             derivedFrom: previousUris,
             influencedBy: stepName,
@@ -564,7 +578,6 @@ class Flow {
   buildFineProvenanceData(jobId, flowName, stepName, stepDefName, stepDefType, content, info) {
     let previousUris = fn.distinctValues(Sequence.from([Sequence.from(Object.keys(content.provenance)),Sequence.from(info.derivedFrom)]));
     let prov = this.datahub.prov;
-    let hubUtils = this.datahub.hubUtils;
     let newDocURI = content.uri;
     let docProvIDs = [];
     // setup variables to group prov info by properties

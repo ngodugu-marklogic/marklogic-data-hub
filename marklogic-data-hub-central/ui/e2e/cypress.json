@@ -4,6 +4,7 @@
     "viewportWidth": 1680,
     "viewportHeight": 1050,
     "numTestsKeptInMemory": 1,
+    "ignoreTestFiles": "**/curation/load/*.spec.tsx",
     "defaultCommandTimeout": 10000,
     "reporter": "junit",
     "reporterOptions": {

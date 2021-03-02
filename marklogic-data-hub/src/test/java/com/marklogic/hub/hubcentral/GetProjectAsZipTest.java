@@ -4,26 +4,22 @@ import com.marklogic.hub.AbstractHubCoreTest;
 import com.marklogic.hub.HubClient;
 import com.marklogic.hub.HubConfig;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Properties;
-import java.util.Set;
+import java.io.*;
+import java.util.*;
 import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipException;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipInputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+// Running in same thread to see if that helps avoid intermittent Jenkins failures related to zip files
+@Execution(ExecutionMode.SAME_THREAD)
 public class GetProjectAsZipTest extends AbstractHubCoreTest {
 
     private Set<String> zipProjectEntries;
@@ -36,11 +32,18 @@ public class GetProjectAsZipTest extends AbstractHubCoreTest {
     @Test
     void forbiddenUser() {
         runAsTestUserWithRoles("data-hub-operator");
-        verifyTestUserIsForbiddenTo(()->writeProjectToZipFile(getHubClient()), "A user must have the data-hub-download-project-files privilege");
+        verifyTestUserIsForbiddenTo(() -> {
+                try {
+                    writeProjectToZipFile(getHubClient());
+                } catch (IOException ex) {
+                    throw new RuntimeException(ex);
+                }
+            },
+            "A user must have the data-hub-download-project-files privilege"
+        );
     }
 
     /**
-     *
      * @throws IOException
      */
     @Test
@@ -52,7 +55,7 @@ public class GetProjectAsZipTest extends AbstractHubCoreTest {
         // Download the project, verify the zip is correct
         runAsTestUserWithRoles("hub-central-downloader");
 
-        writeProjectToZipFile(getHubClient());
+        writeProjectToZipFileWithRetry(getHubClient());
         verifyZipProject();
         project.verifyZipArtifacts();
 
@@ -66,7 +69,7 @@ public class GetProjectAsZipTest extends AbstractHubCoreTest {
 
         // Verify that downloading returns a zip without artifacts, since the database was cleared of user files
         runAsTestUser();
-        writeProjectToZipFile(getHubClient());
+        writeProjectToZipFileWithRetry(getHubClient());
         verifyZipProject();
         assertEquals(0, project.getHubCentralFilesZipEntries().size(), "The zip should be empty since the project was reset, and thus there are " +
             "no user artifacts to download; zipEntries: " + new AllArtifactsProject(getHubClient()).getHubCentralFilesZipEntries());
@@ -76,24 +79,43 @@ public class GetProjectAsZipTest extends AbstractHubCoreTest {
         installUserArtifacts();
 
         runAsTestUser();
-        writeProjectToZipFile(getHubClient());
+        writeProjectToZipFileWithRetry(getHubClient());
         verifyZipProject();
         project.verifyZipArtifacts();
     }
 
-    private void writeProjectToZipFile(HubClient hubClient) {
-        try {
-            zipProjectFile = new File("build/allProject.zip");
-            FileOutputStream fos = new FileOutputStream(zipProjectFile);
-            new HubCentralManager().writeProjectFilesAsZip(hubClient, fos);
-            fos.close();
-            project = new AllArtifactsProject(getHubClient());
-            readZipProject();
-            project.readZipArtifacts(new ZipFile(zipProjectFile), Collections.enumeration(artifactZipEntries));
+    /**
+     * Reading the zip after it's written fails intermittently in Jenkins due to the following error:
+     * java.util.zip.ZipException: invalid CEN header (bad signature)
+     * It may be a bug in Java; thus, this method will try multiple times.
+     *
+     * @param hubClient
+     */
+    private void writeProjectToZipFileWithRetry(HubClient hubClient) {
+        final int retryLimit = 10;
+        int attempt = 1;
+        do {
+            try {
+                logger.info("Attempting to write project to and read project from zip file; attempt: " + attempt);
+                writeProjectToZipFile(hubClient);
+                attempt = retryLimit + 1;
+            } catch (ZipException ex) {
+                logger.warn("Caught ZipException: " + ex + "; retrying, attempt: " + attempt);
+                attempt++;
+            } catch (IOException ex) {
+                throw new RuntimeException("Unexpected IOException: " + ex.getMessage(), ex);
+            }
+        } while (attempt <= retryLimit);
+    }
 
-        } catch (IOException e) {
-            throw new RuntimeException(e);
+    private void writeProjectToZipFile(HubClient hubClient) throws IOException {
+        zipProjectFile = new File("build/allProject.zip");
+        try (FileOutputStream fos = new FileOutputStream(zipProjectFile)) {
+            new HubCentralManager().writeProjectFilesAsZip(hubClient, fos);
         }
+        project = new AllArtifactsProject(getHubClient());
+        readZipProject();
+        project.readZipArtifacts(new ZipFile(zipProjectFile), Collections.enumeration(artifactZipEntries));
     }
 
     private void readZipProject() throws IOException {
@@ -104,21 +126,18 @@ public class GetProjectAsZipTest extends AbstractHubCoreTest {
         String[] artifactDirs = {"flows", "steps", "entities", "src/main/entity-config", "src/main/ml-config/security/protected-paths",
             "src/main/ml-config/security/query-rolesets"};
 
-        try(ZipInputStream zipIn = new ZipInputStream(new FileInputStream(zipProjectFile))){
+        try (ZipInputStream zipIn = new ZipInputStream(new FileInputStream(zipProjectFile))) {
             ZipEntry entry = zipIn.getNextEntry();
             while (entry != null) {
-                if("gradle.properties".equals(entry.getName())){
-                    InputStream input = zip.getInputStream(entry);
-                    gradleProps.load(input);
+                if ("gradle.properties".equals(entry.getName())) {
+                    loadPropertiesFromZipEntry(zip, entry, gradleProps);
                 }
-                if("gradle-dhs.properties".equals(entry.getName())){
-                    InputStream input = zip.getInputStream(entry);
-                    gradleDhsProps.load(input);
+                if ("gradle-dhs.properties".equals(entry.getName())) {
+                    loadPropertiesFromZipEntry(zip, entry, gradleDhsProps);
                 }
-                if(Stream.of(artifactDirs).anyMatch(entry.getName()::startsWith) && !entry.isDirectory()){
+                if (Stream.of(artifactDirs).anyMatch(entry.getName()::startsWith) && !entry.isDirectory()) {
                     artifactZipEntries.add(entry);
-                }
-                else{
+                } else {
                     zipProjectEntries.add(entry.getName());
                 }
                 zipIn.closeEntry();
@@ -127,7 +146,21 @@ public class GetProjectAsZipTest extends AbstractHubCoreTest {
         }
     }
 
-    public void verifyZipProject(){
+    private void loadPropertiesFromZipEntry(ZipFile zip, ZipEntry entry, Properties props) {
+        try {
+            InputStream ins = zip.getInputStream(entry);
+            if (ins == null) {
+                logger.warn("Received null InputStream for zip entry: " + entry.getName() + "; will ignore");
+                return;
+            }
+            props.load(ins);
+        } catch (Exception e) {
+            logger.warn("Unable to load properties from zip entry: " + entry.getName() + "; cause: " + e.getMessage() +
+                "entry size: " + entry.getSize());
+        }
+    }
+
+    public void verifyZipProject() {
         assertEquals(HubConfig.DEFAULT_STAGING_NAME, gradleProps.getProperty("mlStagingDbName"));
         assertEquals(String.valueOf(HubConfig.DEFAULT_FINAL_PORT), gradleProps.getProperty("mlFinalPort"));
         assertEquals(HubConfig.DEFAULT_JOB_NAME, gradleProps.getProperty("mlJobAppserverName"));
